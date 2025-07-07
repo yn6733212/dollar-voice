@@ -1,3 +1,5 @@
 yfinance
 edge-tts
 pytz
+requests
+requests-toolbelt
