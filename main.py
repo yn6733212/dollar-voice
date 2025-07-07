@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore")
 USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
-TARGET_PATH = "ivr2:/7/"
+TARGET_PATH = "ivr2:/6/"
 FFMPEG_PATH = "./bin/ffmpeg"
 
 def ensure_ffmpeg():
