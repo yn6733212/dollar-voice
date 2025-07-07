@@ -1,108 +1,107 @@
+import yfinance as yf
+import asyncio
+import datetime
 import os
 import subprocess
-import datetime
-import pytz
-import asyncio
-import yfinance as yf
 from edge_tts import Communicate
-import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder
-import tarfile
+import requests
 import urllib.request
+import tarfile
+import warnings
 
-# === פרטי התחברות לימות המשיח ===
+warnings.filterwarnings("ignore")
+
 USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
-UPLOAD_PATH = "ivr2:/6"
+TARGET_PATH = "ivr2:/7/"
+FFMPEG_PATH = "./bin/ffmpeg"
 
-# === נתונים: שליפת שער הדולר מ־Yahoo Finance ===
-ticker = yf.Ticker("USDILS=X")
-data = ticker.history(period="1d", interval="1m")
-
-last_price = round(data["Close"][-1], 4)
-open_price = round(data["Open"][0], 4)
-high_price = round(data["High"].max(), 4)
-low_price = round(data["Low"].min(), 4)
-
-change = round(((last_price - open_price) / open_price) * 100, 2)
-change_type = "עלייה" if change >= 0 else "ירידה"
-change = abs(change)
+def ensure_ffmpeg():
+    if not os.path.exists(FFMPEG_PATH):
+        print("⬇️ מוריד ffmpeg...")
+        os.makedirs("bin", exist_ok=True)
+        url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        archive_path = "bin/ffmpeg.tar.xz"
+        extract_path = "bin"
+        urllib.request.urlretrieve(url, archive_path)
+        with tarfile.open(archive_path) as tar:
+            tar.extractall(path=extract_path)
+        for root, dirs, files in os.walk(extract_path):
+            for file in files:
+                if file == "ffmpeg":
+                    os.rename(os.path.join(root, file), FFMPEG_PATH)
+                    os.chmod(FFMPEG_PATH, 0o755)
+                    break
 
 def split_price(value):
     shekels = int(value)
     agorot = int(round((value - shekels) * 100))
     return shekels, agorot
 
-ps, pa = split_price(last_price)
-ls, la = split_price(low_price)
-hs, ha = split_price(high_price)
+def build_text():
+    ticker = yf.Ticker("USDILS=X")
+    data = ticker.history(period="1d", interval="1m")
 
-# שעה ותאריך נוכחיים
-tz = pytz.timezone("Asia/Jerusalem")
-now = datetime.datetime.now(tz)
-datetime_prefix = now.strftime("%d_%m_%H_%M")
+    if data.empty:
+        return None
 
-# טקסט להקראה
-text = f"שער הדולר היציג המעודכן עומד כעת על {ps} שקלים ו{pa} אגורות, " \
-       f"מתחילת היום נרשמה {change_type} של {change} אחוז, " \
-       f"ביממה האחרונה הדולר נע בטווח של {ls} שקלים ו{la} אגורות עד {hs} שקלים ו{ha} אגורות."
+    last_price = round(data["Close"].iloc[-1], 4)
+    open_price = round(data["Open"].iloc[0], 4)
+    high_price = round(data["High"].max(), 4)
+    low_price = round(data["Low"].min(), 4)
 
-print("🎙️ טקסט להקראה:", text)
+    change = round(((last_price - open_price) / open_price) * 100, 2)
+    change_type = "עלייה" if change >= 0 else "ירידה"
+    change = abs(change)
 
-# === שמות קבצים ===
-TEMP_MP3 = "temp.mp3"
-WAV_FILE = "001.wav"
+    ps, pa = split_price(last_price)
+    ls, la = split_price(low_price)
+    hs, ha = split_price(high_price)
 
-# === בדיקה והתקנת ffmpeg אם צריך ===
-def ensure_ffmpeg():
-    if not os.path.exists("ffmpeg_bin"):
-        print("⬇️ מתקין ffmpeg...")
-        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        urllib.request.urlretrieve(url, "ffmpeg.zip")
-        os.system("unzip -o ffmpeg.zip -d ffmpeg_bin")
-        for root, dirs, files in os.walk("ffmpeg_bin"):
-            for name in files:
-                if name == "ffmpeg.exe":
-                    os.rename(os.path.join(root, name), "ffmpeg.exe")
-                    break
-        print("✅ ffmpeg הותקן.")
+    text = f"שער הדולר היציג המעודכן עומד כעת על {ps} שקלים ו{pa} אגורות, " \
+           f"מתחילת היום נרשמה {change_type} של {change} אחוז, " \
+           f"ביממה האחרונה הדולר נע בטווח של {ls} שקלים ו{la} אגורות עד {hs} שקלים ו{ha} אגורות."
+    
+    print("📜 טקסט שנוצר:", text)
+    return text
+
+async def text_to_speech(text, filename):
+    communicate = Communicate(text, voice="he-IL-AvriNeural")
+    await communicate.save(filename)
+
+def convert_to_wav(mp3_file, wav_file):
+    ensure_ffmpeg()
+    with open(os.devnull, 'w') as devnull:
+        subprocess.run(
+            [FFMPEG_PATH, "-y", "-i", mp3_file, "-ar", "8000", "-ac", "1", "-acodec", "pcm_s16le", wav_file],
+            stdout=devnull,
+            stderr=devnull
+        )
+
+def upload_to_yemot(wav_file, path):
+    m = MultipartEncoder(fields={
+        'token': TOKEN,
+        'path': path + "001.wav",
+        'file': ("001.wav", open(wav_file, 'rb'), 'audio/wav')
+    })
+    r = requests.post("https://www.call2all.co.il/ym/api/UploadFile", data=m, headers={'Content-Type': m.content_type})
+    if r.ok:
+        print("✅ הועלה בהצלחה")
     else:
-        print("🎯 ffmpeg כבר קיים.")
+        print("❌ שגיאה בהעלאה:", r.text)
 
-ensure_ffmpeg()
+async def main():
+    print("🚀 ריצה התחילה...")
+    text = build_text()
+    if not text:
+        print("⚠️ לא נמצאו נתונים")
+        return
 
-# === יצירת קובץ שמע באמצעות edge-tts ===
-async def generate_audio():
-    communicate = Communicate(text=text, voice="he-IL-AvriNeural")
-    await communicate.save(TEMP_MP3)
+    await text_to_speech(text, "dollar.mp3")
+    convert_to_wav("dollar.mp3", "dollar.wav")
+    upload_to_yemot("dollar.wav", TARGET_PATH)
 
-asyncio.run(generate_audio())
-
-# === המרה ל-WAV בפורמט תואם ימות המשיח ===
-subprocess.run([
-    "ffmpeg", "-y",
-    "-i", TEMP_MP3,
-    "-ar", "8000",
-    "-ac", "1",
-    "-acodec", "pcm_s16le",
-    WAV_FILE
-])
-
-print("✅ קובץ WAV נוצר:", WAV_FILE)
-
-# === העלאה לימות המשיח ===
-with open(WAV_FILE, "rb") as f:
-    m = MultipartEncoder(
-        fields={
-            "token": TOKEN,
-            "path": f"{UPLOAD_PATH}/{WAV_FILE}",
-            "file": ("file", f, "audio/wav")
-        }
-    )
-    response = requests.post("https://www.call2all.co.il/ym/api/UploadFile", data=m, headers={"Content-Type": m.content_type})
-
-if response.ok:
-    print("📤 קובץ הועלה לשלוחה 6 בהצלחה.")
-else:
-    print("❌ שגיאה בהעלאה:", response.text)
+if __name__ == "__main__":
+    asyncio.run(main())
